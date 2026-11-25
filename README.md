@@ -235,6 +235,10 @@ do depends on the proxy:
   `x-scan-time-ms`) are request-header changes made on the body, after the
   upstream request's headers have gone out, so they are dropped with a
   warning and do not reach it.
+- From Zentinel 26.11_3, the proxy sends `RequestComplete` when a request
+  ends, and the agent drops what it kept for a request marked for scanning
+  that sent no body. With older proxies, each such request stays in memory
+  (and in `content_scanner_in_flight_requests`) until the agent restarts.
 
 ## Development
 

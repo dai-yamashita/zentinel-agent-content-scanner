@@ -14,7 +14,8 @@ use zentinel_agent_protocol::v2::{
     MetricsReport, ShutdownReason,
 };
 use zentinel_agent_protocol::{
-    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestBodyChunkEvent, RequestHeadersEvent,
+    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestBodyChunkEvent, RequestCompleteEvent,
+    RequestHeadersEvent,
 };
 
 /// Content Scanner agent.
@@ -435,6 +436,18 @@ impl AgentHandlerV2 for ContentScannerAgent {
         Some(report)
     }
 
+    /// Drop the context of a finished request.
+    ///
+    /// A request marked for scanning in the headers phase keeps its context
+    /// until its first body chunk. One that sends no body chunk (an empty
+    /// upload, or a client that goes away first) would keep it forever.
+    /// Zentinel 26.11_3 and later send `RequestComplete` to every agent that
+    /// took part in the request, whatever its `events`.
+    async fn on_request_complete(&self, event: RequestCompleteEvent) -> AgentResponse {
+        self.take_context(&event.correlation_id).await;
+        AgentResponse::default_allow()
+    }
+
     /// Handle configuration updates from proxy.
     async fn on_configure(&self, config: serde_json::Value, version: Option<String>) -> bool {
         info!(
@@ -673,5 +686,74 @@ mod tests {
         // Should be gone after take
         let retrieved_again = agent.take_context("req-123").await;
         assert!(retrieved_again.is_none());
+    }
+
+    fn upload_headers(correlation_id: &str) -> RequestHeadersEvent {
+        RequestHeadersEvent {
+            metadata: zentinel_agent_protocol::RequestMetadata {
+                correlation_id: correlation_id.to_string(),
+                request_id: correlation_id.to_string(),
+                client_ip: "127.0.0.1".to_string(),
+                client_port: 12345,
+                server_name: None,
+                protocol: "HTTP/1.1".to_string(),
+                tls_version: None,
+                tls_cipher: None,
+                route_id: None,
+                upstream_id: None,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                traceparent: None,
+            },
+            method: "POST".to_string(),
+            uri: "/upload".to_string(),
+            headers: HashMap::from([(
+                "Content-Type".to_string(),
+                vec!["application/pdf".to_string()],
+            )]),
+        }
+    }
+
+    fn request_complete(correlation_id: &str) -> RequestCompleteEvent {
+        RequestCompleteEvent {
+            correlation_id: correlation_id.to_string(),
+            status: 200,
+            duration_ms: 1,
+            request_body_size: 0,
+            response_body_size: 0,
+            upstream_attempts: 1,
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_without_body_is_released_on_request_complete() {
+        let agent = ContentScannerAgent::new(create_test_config());
+
+        // Marked for scanning, but no body chunk follows (an empty POST, or a
+        // client that goes away before sending the body).
+        let response = agent.on_request_headers(upload_headers("req-1")).await;
+        assert_eq!(response.decision, Decision::Allow);
+        assert_eq!(agent.scan_contexts.read().await.len(), 1);
+
+        agent.on_request_complete(request_complete("req-1")).await;
+        assert!(
+            agent.scan_contexts.read().await.is_empty(),
+            "the context of a finished request is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_complete_leaves_other_requests_alone() {
+        let agent = ContentScannerAgent::new(create_test_config());
+
+        agent.on_request_headers(upload_headers("req-1")).await;
+        agent.on_request_headers(upload_headers("req-2")).await;
+        agent.on_request_complete(request_complete("req-1")).await;
+        // A request that is not marked (or already scanned) is a no-op.
+        agent.on_request_complete(request_complete("req-3")).await;
+
+        let contexts = agent.scan_contexts.read().await;
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts.contains_key("req-2"));
     }
 }
