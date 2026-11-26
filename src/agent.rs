@@ -211,7 +211,9 @@ impl AgentHandlerV2 for ContentScannerAgent {
         // Get content-type
         let content_type = Self::get_header(&headers, "content-type").map(|s| s.to_string());
 
-        // Check if content-type should be scanned
+        // Check if the declared content-type should be scanned (a request
+        // without a content-type, or with one that names no media type, is
+        // always scanned)
         if !self
             .config
             .should_scan_content_type(content_type.as_deref())
@@ -666,6 +668,165 @@ mod tests {
         assert!(!report.gauges.is_empty());
     }
 
+    fn headers_event(
+        correlation_id: &str,
+        method: &str,
+        uri: &str,
+        content_type: Option<&str>,
+    ) -> RequestHeadersEvent {
+        let mut headers = HashMap::new();
+        headers.insert("Host".to_string(), vec!["a.example".to_string()]);
+        if let Some(ct) = content_type {
+            headers.insert("Content-Type".to_string(), vec![ct.to_string()]);
+        }
+
+        RequestHeadersEvent {
+            metadata: zentinel_agent_protocol::RequestMetadata {
+                correlation_id: correlation_id.to_string(),
+                request_id: format!("{correlation_id}-request"),
+                client_ip: "192.0.2.10".to_string(),
+                client_port: 40000,
+                server_name: Some("a.example".to_string()),
+                protocol: "HTTP/1.1".to_string(),
+                tls_version: None,
+                tls_cipher: None,
+                route_id: None,
+                upstream_id: None,
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                traceparent: None,
+            },
+            method: method.to_string(),
+            uri: uri.to_string(),
+            headers,
+        }
+    }
+
+    fn skipped_marker(value: &str) -> HeaderOp {
+        HeaderOp::Set {
+            name: "x-scan-skipped".to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_content_type_scanned_with_empty_list() {
+        let agent = ContentScannerAgent::new(create_test_config());
+
+        let response = agent
+            .on_request_headers(headers_event("req-1", "POST", "/upload", None))
+            .await;
+
+        assert_eq!(response.decision, Decision::Allow);
+        assert!(response.request_headers.is_empty());
+        let ctx = agent.take_context("req-1").await.expect("context stored");
+        assert_eq!(ctx.content_type, None);
+        assert_eq!(ctx.path, "/upload");
+        assert_eq!(ctx.method, "POST");
+    }
+
+    #[tokio::test]
+    async fn test_missing_content_type_scanned_with_filter() {
+        let mut config = create_test_config();
+        config.body.content_types = vec!["application/pdf".to_string()];
+        let agent = ContentScannerAgent::new(config);
+
+        let response = agent
+            .on_request_headers(headers_event("req-1", "POST", "/upload", None))
+            .await;
+
+        assert_eq!(response.decision, Decision::Allow);
+        assert!(response.request_headers.is_empty());
+        let ctx = agent.take_context("req-1").await.expect("context stored");
+        assert_eq!(ctx.content_type, None);
+    }
+
+    #[tokio::test]
+    async fn test_declared_type_outside_list_marked_skipped() {
+        let mut config = create_test_config();
+        config.body.content_types = vec!["application/pdf".to_string()];
+        let agent = ContentScannerAgent::new(config);
+
+        let response = agent
+            .on_request_headers(headers_event(
+                "req-1",
+                "POST",
+                "/upload",
+                Some("text/plain"),
+            ))
+            .await;
+
+        assert_eq!(response.decision, Decision::Allow);
+        assert_eq!(
+            response.request_headers,
+            vec![skipped_marker("content-type-excluded")]
+        );
+        assert!(agent.take_context("req-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_declared_type_in_list_scanned() {
+        let mut config = create_test_config();
+        config.body.content_types = vec!["application/pdf".to_string()];
+        let agent = ContentScannerAgent::new(config);
+
+        let response = agent
+            .on_request_headers(headers_event(
+                "req-1",
+                "POST",
+                "/upload",
+                Some("application/pdf"),
+            ))
+            .await;
+
+        assert_eq!(response.decision, Decision::Allow);
+        assert!(response.request_headers.is_empty());
+        let ctx = agent.take_context("req-1").await.expect("context stored");
+        assert_eq!(ctx.content_type.as_deref(), Some("application/pdf"));
+    }
+
+    #[tokio::test]
+    async fn test_missing_content_type_still_follows_method_and_skip_paths() {
+        let mut config = create_test_config();
+        config.body.content_types = vec!["application/pdf".to_string()];
+        let agent = ContentScannerAgent::new(config);
+
+        // The method is not configured for scanning.
+        let response = agent
+            .on_request_headers(headers_event("req-1", "GET", "/upload", None))
+            .await;
+        assert_eq!(response.decision, Decision::Allow);
+        assert!(response.request_headers.is_empty());
+        assert!(agent.take_context("req-1").await.is_none());
+
+        // The path is excluded from scanning.
+        let response = agent
+            .on_request_headers(headers_event("req-2", "POST", "/health", None))
+            .await;
+        assert_eq!(response.decision, Decision::Allow);
+        assert!(response.request_headers.is_empty());
+        assert!(agent.take_context("req-2").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_empty_content_type_scanned_like_missing() {
+        for content_types in [vec![], vec!["application/pdf".to_string()]] {
+            let mut config = create_test_config();
+            config.body.content_types = content_types;
+            let agent = ContentScannerAgent::new(config);
+
+            for (i, value) in ["", "   ", "; charset=utf-8"].into_iter().enumerate() {
+                let id = format!("req-{i}");
+                let response = agent
+                    .on_request_headers(headers_event(&id, "POST", "/upload", Some(value)))
+                    .await;
+
+                assert_eq!(response.decision, Decision::Allow);
+                assert!(response.request_headers.is_empty());
+                assert!(agent.take_context(&id).await.is_some());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_store_and_take_context() {
         let config = create_test_config();
@@ -689,28 +850,7 @@ mod tests {
     }
 
     fn upload_headers(correlation_id: &str) -> RequestHeadersEvent {
-        RequestHeadersEvent {
-            metadata: zentinel_agent_protocol::RequestMetadata {
-                correlation_id: correlation_id.to_string(),
-                request_id: correlation_id.to_string(),
-                client_ip: "127.0.0.1".to_string(),
-                client_port: 12345,
-                server_name: None,
-                protocol: "HTTP/1.1".to_string(),
-                tls_version: None,
-                tls_cipher: None,
-                route_id: None,
-                upstream_id: None,
-                timestamp: "2026-01-01T00:00:00Z".to_string(),
-                traceparent: None,
-            },
-            method: "POST".to_string(),
-            uri: "/upload".to_string(),
-            headers: HashMap::from([(
-                "Content-Type".to_string(),
-                vec!["application/pdf".to_string()],
-            )]),
-        }
+        headers_event(correlation_id, "POST", "/upload", Some("application/pdf"))
     }
 
     fn request_complete(correlation_id: &str) -> RequestCompleteEvent {
@@ -740,6 +880,19 @@ mod tests {
             agent.scan_contexts.read().await.is_empty(),
             "the context of a finished request is kept"
         );
+    }
+
+    #[tokio::test]
+    async fn test_request_without_content_type_or_body_is_released_on_request_complete() {
+        let agent = ContentScannerAgent::new(create_test_config());
+
+        agent
+            .on_request_headers(headers_event("req-1", "POST", "/upload", None))
+            .await;
+        assert_eq!(agent.scan_contexts.read().await.len(), 1);
+
+        agent.on_request_complete(request_complete("req-1")).await;
+        assert!(agent.scan_contexts.read().await.is_empty());
     }
 
     #[tokio::test]

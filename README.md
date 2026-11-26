@@ -183,7 +183,7 @@ skip_paths:
 | `settings.log_detections` | `true` | Log each detection at `info`. |
 | `settings.log_clean` | `false` | Log clean scans at `debug`. |
 | `body.max_size` | `52428800` | Bodies larger than this many bytes are forwarded unscanned (`x-scan-skipped: size-exceeded`). |
-| `body.content_types` | `[]` (all) | Content types to scan. Exact (`application/pdf`), wildcard subtype (`application/*`) or prefix glob (`application/vnd.*`); parameters such as `; charset=` are ignored. A request without a `Content-Type` header is never scanned. |
+| `body.content_types` | `[]` (all) | Content types to scan. Exact (`application/pdf`), wildcard subtype (`application/*`) or prefix glob (`application/vnd.*`); parameters such as `; charset=` are ignored. A request without a `Content-Type` header, or with one that names no media type (empty, or only parameters), is always scanned, whatever this list says; only a declared type that matches no entry is skipped. |
 | `clamd.enabled` | `true` | `false` allows every request unscanned. |
 | `clamd.socket_path` | `/var/run/clamav/clamd.ctl` | Path of the `clamd` Unix socket. |
 | `clamd.timeout_ms` | `30000` | Timeout for each socket operation with `clamd`, in milliseconds. |
@@ -200,6 +200,9 @@ Full reference: <https://registry.zentinelproxy.io/content-scanner/>
 
 - On `request_headers` the agent decides whether the request is a candidate
   (enabled, method, `skip_paths`, `Content-Type`). Non-candidates are allowed at once.
+  A request without a `Content-Type`, or with one that names no media type, is a
+  candidate whatever `body.content_types` says; a declared `Content-Type` must
+  match it, or the request is allowed with `x-scan-skipped: content-type-excluded`.
 - On the first `request_body` chunk it sends the body to `clamd` and decides.
   Only that first chunk is scanned, so keep `request-body-mode "buffer"` (the
   default), which delivers the whole body as one chunk, and set the proxy's
@@ -207,6 +210,8 @@ Full reference: <https://registry.zentinelproxy.io/content-scanner/>
 - Headers it adds to the request forwarded upstream: `x-content-scanned: true` and
   `x-scan-time-ms` after a clean scan, `x-scan-skipped` (`size-exceeded`,
   `content-type-excluded`, `clamd-unavailable`) when it did not scan.
+  `content-type-excluded` is set only when the request declared a media type
+  that matches no `body.content_types` entry.
 - Headers on its block responses: `x-malware-detected: true`, `x-malware-name` and
   `x-scan-time-ms` on the `403`; `x-scan-error: clamd-unavailable` on the `503`.
 - Audit tags: `content-scanner:clean`, `content-scanner:malware:<name>`,
