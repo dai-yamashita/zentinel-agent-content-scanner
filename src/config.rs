@@ -76,7 +76,9 @@ pub struct BodyConfig {
     #[serde(default = "default_max_size")]
     pub max_size: usize,
 
-    /// Content types to scan (empty = all).
+    /// Content types to scan (empty = all). A request without a
+    /// `Content-Type` header, or with one that names no media type, is always
+    /// scanned.
     #[serde(default)]
     pub content_types: Vec<String>,
 }
@@ -191,11 +193,16 @@ impl Config {
     }
 
     /// Check if a content type should be scanned.
+    ///
+    /// A request without a `Content-Type` (`None`), or with one that names no
+    /// media type (empty, blank, or only parameters such as
+    /// `; charset=utf-8`), is always scanned: a type the client does not
+    /// declare cannot be matched against `body.content_types`. A declared type
+    /// is scanned when the list is empty or one of its patterns matches.
     pub fn should_scan_content_type(&self, content_type: Option<&str>) -> bool {
-        // No Content-Type header means we can't determine if it should be scanned
         let content_type = match content_type {
-            Some(ct) => ct,
-            None => return false,
+            Some(ct) if !media_type(ct).is_empty() => ct,
+            _ => return true,
         };
 
         // If no content types specified, scan all
@@ -222,7 +229,10 @@ settings:
 # Body handling
 body:
   max_size: 52428800           # 50MB max body to scan
-  content_types:               # Only scan these content types (empty = all)
+  # Only scan these content types (empty = all). A request without a
+  # Content-Type header, or with one that names no media type, is always
+  # scanned.
+  content_types:
     - "application/octet-stream"
     - "application/zip"
     - "application/x-zip-compressed"
@@ -264,12 +274,7 @@ scan_methods:
 /// - Wildcard subtype: "application/*"
 /// - Glob suffix: "application/vnd.*"
 pub fn matches_content_type(pattern: &str, content_type: &str) -> bool {
-    // Extract just the media type (before any parameters like charset)
-    let media_type = content_type
-        .split(';')
-        .next()
-        .unwrap_or(content_type)
-        .trim();
+    let media_type = media_type(content_type);
 
     if let Some(prefix) = pattern.strip_suffix("/*") {
         // Wildcard subtype: "application/*" matches "application/json"
@@ -281,6 +286,15 @@ pub fn matches_content_type(pattern: &str, content_type: &str) -> bool {
         // Exact match
         media_type == pattern
     }
+}
+
+/// Extract just the media type (before any parameters like charset).
+fn media_type(content_type: &str) -> &str {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
 }
 
 /// Expand environment variables in the format ${VAR_NAME}.
@@ -425,7 +439,8 @@ mod tests {
 
         assert!(config.should_scan_content_type(Some("application/json")));
         assert!(config.should_scan_content_type(Some("application/octet-stream")));
-        assert!(!config.should_scan_content_type(None));
+        // A request that declares no type is scanned too.
+        assert!(config.should_scan_content_type(None));
     }
 
     #[test]
@@ -447,6 +462,62 @@ mod tests {
         assert!(config.should_scan_content_type(Some("application/octet-stream")));
         assert!(config.should_scan_content_type(Some("application/zip")));
         assert!(!config.should_scan_content_type(Some("application/json")));
+    }
+
+    #[test]
+    fn test_should_scan_content_type_missing_with_filter() {
+        let config = Config {
+            settings: Settings::default(),
+            body: BodyConfig {
+                max_size: default_max_size(),
+                content_types: vec!["application/pdf".to_string()],
+            },
+            clamd: ClamdConfig::default(),
+            skip_paths: vec![],
+            scan_methods: vec![],
+        };
+
+        // No Content-Type cannot be matched against the list, so it is scanned.
+        assert!(config.should_scan_content_type(None));
+    }
+
+    #[test]
+    fn test_should_scan_content_type_declared_mismatch_not_scanned() {
+        let config = Config {
+            settings: Settings::default(),
+            body: BodyConfig {
+                max_size: default_max_size(),
+                content_types: vec!["application/pdf".to_string()],
+            },
+            clamd: ClamdConfig::default(),
+            skip_paths: vec![],
+            scan_methods: vec![],
+        };
+
+        assert!(!config.should_scan_content_type(Some("text/plain")));
+        assert!(!config.should_scan_content_type(Some("text/plain; charset=utf-8")));
+        assert!(config.should_scan_content_type(Some("application/pdf")));
+    }
+
+    #[test]
+    fn test_should_scan_content_type_without_media_type() {
+        for content_types in [vec![], vec!["application/pdf".to_string()]] {
+            let config = Config {
+                settings: Settings::default(),
+                body: BodyConfig {
+                    max_size: default_max_size(),
+                    content_types,
+                },
+                clamd: ClamdConfig::default(),
+                skip_paths: vec![],
+                scan_methods: vec![],
+            };
+
+            // A value that names no media type declares no type.
+            assert!(config.should_scan_content_type(Some("")));
+            assert!(config.should_scan_content_type(Some("   ")));
+            assert!(config.should_scan_content_type(Some("; charset=utf-8")));
+        }
     }
 
     #[test]
