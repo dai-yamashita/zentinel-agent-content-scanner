@@ -764,6 +764,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_declared_type_matched_ignoring_ascii_case() {
+        let mut config = create_test_config();
+        config.body.content_types = vec!["application/pdf".to_string()];
+        let agent = ContentScannerAgent::new(config);
+
+        for (i, value) in ["Application/PDF", "APPLICATION/pdf; charset=UTF-8"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = format!("req-{i}");
+            let response = agent
+                .on_request_headers(headers_event(&id, "POST", "/upload", Some(value)))
+                .await;
+
+            assert_eq!(response.decision, Decision::Allow);
+            assert!(response.request_headers.is_empty());
+            let ctx = agent.take_context(&id).await.expect("context stored");
+            assert_eq!(ctx.content_type.as_deref(), Some(value));
+        }
+    }
+
+    #[tokio::test]
     async fn test_declared_type_in_list_scanned() {
         let mut config = create_test_config();
         config.body.content_types = vec!["application/pdf".to_string()];

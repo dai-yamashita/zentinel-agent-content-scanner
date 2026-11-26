@@ -190,7 +190,7 @@ skip_paths:
 | `settings.log_detections` | `true` | Log each detection at `info`. |
 | `settings.log_clean` | `false` | Log clean scans at `debug`. |
 | `body.max_size` | `52428800` | Bodies larger than this many bytes are forwarded unscanned (`x-scan-skipped: size-exceeded`). |
-| `body.content_types` | `[]` (all) | Content types to scan. Exact (`application/pdf`), wildcard subtype (`application/*`) or prefix glob (`application/vnd.*`); parameters such as `; charset=` are ignored. A request without a `Content-Type` header, or with one that names no media type (empty, or only parameters), is always scanned, whatever this list says; only a declared type that matches no entry is skipped. |
+| `body.content_types` | `[]` (all) | Content types to scan. Exact (`application/pdf`), wildcard subtype (`application/*`) or prefix glob (`application/vnd.*`); matching ignores ASCII case (`application/pdf` matches `Application/PDF`) and parameters such as `; charset=`. A request without a `Content-Type` header, or with one that names no media type (empty, or only parameters), is always scanned, whatever this list says; only a declared type that matches no entry is skipped. |
 | `clamd.enabled` | `true` | `false` allows every request unscanned. |
 | `clamd.socket_path` | `/var/run/clamav/clamd.ctl` | Path of the `clamd` Unix socket. |
 | `clamd.timeout_ms` | `30000` | Timeout for each socket operation with `clamd`, in milliseconds. |
@@ -209,7 +209,8 @@ Full reference: <https://registry.zentinelproxy.io/content-scanner/>
   (enabled, method, `skip_paths`, `Content-Type`). Non-candidates are allowed at once.
   A request without a `Content-Type`, or with one that names no media type, is a
   candidate whatever `body.content_types` says; a declared `Content-Type` must
-  match it, or the request is allowed with `x-scan-skipped: content-type-excluded`.
+  match it (ignoring ASCII case), or the request is allowed with
+  `x-scan-skipped: content-type-excluded`.
 - On the first `request_body` chunk it sends the body to `clamd` and decides.
   Only that first chunk is scanned, so keep `request-body-mode "buffer"` (the
   default), which delivers the whole body as one chunk, and set the proxy's

@@ -76,9 +76,9 @@ pub struct BodyConfig {
     #[serde(default = "default_max_size")]
     pub max_size: usize,
 
-    /// Content types to scan (empty = all). A request without a
-    /// `Content-Type` header, or with one that names no media type, is always
-    /// scanned.
+    /// Content types to scan (empty = all). Types are compared without regard
+    /// to ASCII case. A request without a `Content-Type` header, or with one
+    /// that names no media type, is always scanned.
     #[serde(default)]
     pub content_types: Vec<String>,
 }
@@ -273,19 +273,34 @@ scan_methods:
 /// - Exact match: "application/json"
 /// - Wildcard subtype: "application/*"
 /// - Glob suffix: "application/vnd.*"
+///
+/// The comparison ignores ASCII case on both sides, since the type and
+/// subtype of a media type are case-insensitive (RFC 9110, section 8.3.1):
+/// the pattern "application/pdf" matches "Application/PDF". Only ASCII letters
+/// are folded.
 pub fn matches_content_type(pattern: &str, content_type: &str) -> bool {
     let media_type = media_type(content_type);
 
     if let Some(prefix) = pattern.strip_suffix("/*") {
         // Wildcard subtype: "application/*" matches "application/json"
-        media_type.starts_with(prefix)
+        starts_with_ignore_ascii_case(media_type, prefix)
     } else if let Some(prefix) = pattern.strip_suffix('*') {
         // Glob suffix: "application/vnd.*" matches "application/vnd.ms-excel"
-        media_type.starts_with(prefix)
+        starts_with_ignore_ascii_case(media_type, prefix)
     } else {
         // Exact match
-        media_type == pattern
+        media_type.eq_ignore_ascii_case(pattern)
     }
+}
+
+/// Check whether `value` starts with `prefix`, ignoring ASCII case.
+///
+/// Compares bytes, so it never cuts `value` inside a multi-byte character.
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 /// Extract just the media type (before any parameters like charset).
@@ -377,6 +392,100 @@ mod tests {
             "application/vnd.*",
             "application/json"
         ));
+    }
+
+    #[test]
+    fn test_matches_content_type_ignores_ascii_case_exact() {
+        // Value only, pattern only, and both mixed.
+        assert!(matches_content_type("application/pdf", "Application/PDF"));
+        assert!(matches_content_type("application/pdf", "APPLICATION/pdf"));
+        assert!(matches_content_type("Application/PDF", "application/pdf"));
+        assert!(matches_content_type("Application/pdf", "application/PDF"));
+        assert!(matches_content_type(
+            "application/pdf",
+            "Application/PDF; charset=UTF-8"
+        ));
+        assert!(matches_content_type(
+            "application/pdf",
+            "  Application/PDF "
+        ));
+        assert!(!matches_content_type("application/pdf", "Application/PDFX"));
+        assert!(!matches_content_type("Application/PDF", "text/plain"));
+    }
+
+    #[test]
+    fn test_matches_content_type_ignores_ascii_case_wildcard() {
+        assert!(matches_content_type("application/*", "APPLICATION/zip"));
+        assert!(matches_content_type("Application/*", "application/zip"));
+        assert!(matches_content_type("Application/*", "APPLICATION/Zip"));
+        assert!(!matches_content_type("application/*", "TEXT/html"));
+        assert!(!matches_content_type("Application/*", "text/html"));
+    }
+
+    #[test]
+    fn test_matches_content_type_ignores_ascii_case_glob() {
+        assert!(matches_content_type(
+            "application/vnd.*",
+            "Application/VND.MS-Excel"
+        ));
+        assert!(matches_content_type(
+            "Application/Vnd.*",
+            "application/vnd.ms-excel"
+        ));
+        assert!(matches_content_type(
+            "Application/Vnd.*",
+            "APPLICATION/VND.ms-excel"
+        ));
+        assert!(!matches_content_type(
+            "application/vnd.*",
+            "Application/JSON"
+        ));
+    }
+
+    #[test]
+    fn test_matches_content_type_non_ascii_does_not_match_or_panic() {
+        // Only ASCII letters are folded, and no value is cut inside a
+        // multi-byte character.
+        assert!(!matches_content_type("application/pdf", "\u{e9}/pdf"));
+        assert!(!matches_content_type(
+            "application/pdf",
+            "application\u{e9}"
+        ));
+        assert!(!matches_content_type("\u{e9}/pdf", "\u{c9}/pdf"));
+        assert!(matches_content_type("\u{e9}/pdf", "\u{e9}/PDF"));
+        // The pattern's prefix ends inside the value's multi-byte character.
+        assert!(!matches_content_type("application/*", "applicatio\u{e9}"));
+        assert!(!matches_content_type(
+            "application/vnd.*",
+            "application/vnd\u{e9}"
+        ));
+        assert!(!matches_content_type(
+            "application/vnd.*",
+            "application\u{e9}"
+        ));
+        // Values shorter than the pattern.
+        assert!(!matches_content_type("application/vnd.*", "application"));
+        assert!(!matches_content_type("application/vnd.*", ""));
+        assert!(!matches_content_type("application/pdf", "application"));
+        assert!(!matches_content_type("application/pdf", ""));
+    }
+
+    #[test]
+    fn test_should_scan_content_type_ignores_ascii_case() {
+        let config = Config {
+            settings: Settings::default(),
+            body: BodyConfig {
+                max_size: default_max_size(),
+                content_types: vec!["application/pdf".to_string(), "Image/*".to_string()],
+            },
+            clamd: ClamdConfig::default(),
+            skip_paths: vec![],
+            scan_methods: vec![],
+        };
+
+        assert!(config.should_scan_content_type(Some("Application/PDF")));
+        assert!(config.should_scan_content_type(Some("IMAGE/png; name=A.PNG")));
+        assert!(!config.should_scan_content_type(Some("Text/Plain")));
     }
 
     #[test]
