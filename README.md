@@ -109,6 +109,13 @@ zentinel bundle install content-scanner
 
 Downloads the release binary pinned in Zentinel's bundle lock and installs it as `zentinel-content-scanner-agent`.
 
+> [!WARNING]
+> Up to `0.5.0`, a request without a `Content-Type` (or with one naming no
+> media type) was never scanned, even with `content_types` empty, so an upload
+> sent without the header reached the upstream unscanned; and a request marked
+> for scanning that sent no body kept its state until the agent restarted.
+> Both are fixed in `0.6.0` (#10, #9); use `0.6.0` or later.
+
 ### Release binaries
 
 Tarballs for `linux-x86_64`, `linux-aarch64` and `darwin-aarch64` are attached to each [release](https://github.com/zentinelproxy/zentinel-agent-content-scanner/releases).
